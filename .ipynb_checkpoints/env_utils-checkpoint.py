@@ -34,6 +34,7 @@ class EdgeHost:
         self.active_sessions = []
         self.is_on = False
         self.on_off_counter = 0
+        self.session_counter = 0
 
     def is_full(self, requested_traffic):
         return (self.traffic + requested_traffic)>self.max_traffic
@@ -50,7 +51,7 @@ class EdgeHost:
         if self.is_on == False:
             return 0
             
-        traffic = self.traffic
+        traffic = round(self.traffic,3) #dirty to solve floating point errors
         t = traffic / self.max_traffic
         lp = math.floor(t*10)
         hp = math.ceil(t*10)
@@ -62,7 +63,7 @@ class EdgeHost:
         if self.is_on == False:
             return 0
             
-        traffic = self.traffic
+        traffic = round(self.traffic,3) #dirty to solve floating point errors
         t = traffic / self.max_traffic
         lp = math.floor(t*10)
         hp = math.ceil(t*10)
@@ -85,6 +86,7 @@ class EdgeHost:
             self.on_off_counter += 1
 
         self.traffic += session.throughput
+        self.session_counter +=1
         heapq.heappush(self.active_sessions, (session.end_time, session))
         return 0
         
@@ -108,6 +110,8 @@ class EdgeHost:
     def reset(self):
         #self.cpu = 0
         self.traffic = 0
+        self.session_counter = 0
+        self.on_off_counter = 0
         self.active_sessions.clear()
         self.is_on = True
 
@@ -120,6 +124,7 @@ class CloudHost:
         self.base_latency = latency
         self.traffic = 0
         self.active_sessions = []
+        self.session_counter = 0
 
     def get_traffic(self):
         traffic = 0
@@ -128,11 +133,11 @@ class CloudHost:
         return traffic
 
     def get_power_consumption(self):
-        power = self.traffic * self.power_coef
+        power = round(self.traffic,3) * self.power_coef
         return power
 
     def get_cpu_consumption(self):
-        cpu = self.traffic * self.cpu_coef
+        cpu = round(self.traffic,3) * self.cpu_coef
         return cpu
 
     def get_latency(self):
@@ -140,6 +145,7 @@ class CloudHost:
 
     def add_session(self, session):
         self.traffic += session.throughput
+        self.session_counter +=1
         heapq.heappush(self.active_sessions, (session.end_time, session))
         return 0
         
@@ -157,11 +163,10 @@ class CloudHost:
     
     def reset(self):
         self.traffic = 0
+        self.session_counter = 0
         self.active_sessions.clear()
 
 class PDUSession:
-
-    #latencies = [30,40,300]
 
     def __init__(self, qi, latency, priority ,duration, throughput, start_time):
         

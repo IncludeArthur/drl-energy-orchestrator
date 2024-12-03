@@ -5,6 +5,7 @@ import heapq
 
 import gymnasium as gym
 from gymnasium import spaces
+from gymnasium.utils import seeding
 
 from env_utils import CloudHost, EdgeHost, PDUSession
 
@@ -12,7 +13,7 @@ class NfvAllocEnv(gym.Env):
 
     ''' #### ENVIRONMENT FUNCTIONS #### '''
 
-    def __init__(self, config_file, metric, dt_scale, duration_mean, duration_scale, qi_dict):
+    def __init__(self, config_file, obs_metric, rw_metric, dt_scale, duration_mean, duration_scale, qi_dict, flat_lerr=False):
 
         self.time = 0
         self.qos_breach = 0
@@ -25,9 +26,12 @@ class NfvAllocEnv(gym.Env):
         power_coef = 10
 
         self.autogen_sessions = True
-        self.metric = metric
+        self.ep_requests = []
+        self.flat_lerr = flat_lerr
+        self.obs_metric = obs_metric
+        self.rw_metric = rw_metric
 
-        f = open(config_file)
+        f = open('models/'+config_file)
         host_config = json.load(f)
         
         self.cloud_node = CloudHost(power_coef=host_config['cloud']['power_coef'], latency=host_config['cloud']['latency'], cpu_coef=host_config['cloud']['cpu_coef'])
@@ -38,7 +42,7 @@ class NfvAllocEnv(gym.Env):
         for node in edge_hosts_config:
             self.edge_nodes.append(EdgeHost(power_model=node['power_model'], latency=node['latency'], max_traffic=node['max_traffic'], cpu_model=node['cpu_model']))
 
-        # RNG paramters
+        # Session generator paramters
         self.dt_scale = dt_scale
         self.duration_mean = duration_mean 
         self.duration_scale = duration_scale
@@ -54,7 +58,7 @@ class NfvAllocEnv(gym.Env):
         self.reward_normalization = 1 #10e2 
         self.reward_latency_normalization = 0.05 #0.01
         
-        self.rng = None
+        #self.rng = None
         self.request = None
         self.dt = 0
 
@@ -64,8 +68,8 @@ class NfvAllocEnv(gym.Env):
         # action space = discrete |E|+1 
         self.action_space = spaces.Discrete(self.n_edges + 1) #0 is the cloud node
 
-        print(self.cloud_node)
-        print(self.edge_nodes)
+        #print(self.cloud_node)
+        #print(self.edge_nodes)
         
         return
 
@@ -78,6 +82,8 @@ class NfvAllocEnv(gym.Env):
         latency_error = 0
         reward = 0
 
+        if type(action) is np.ndarray: action = int(action) #for some reason we need this for dummyvecenv test
+            
         # take action
         if action == 0:
             #assign PDU session to cloud
@@ -94,12 +100,12 @@ class NfvAllocEnv(gym.Env):
         total_traffic = self.measure_traffic()
             
         if total_traffic != 0:
-            #if self.metric == 'cpu':
-            #    reward = -total_cpu/(total_traffic*self.reward_normalization)
-            #else:
-            #    reward = -total_power/(total_traffic*self.reward_normalization)
+            if self.rw_metric == 'cpu':
+                reward = -total_cpu/(total_traffic*self.reward_normalization)
+            else:
+                reward = -total_power/(total_traffic*self.reward_normalization)
             
-            reward = -total_power/(total_traffic*self.reward_normalization)
+            #reward = -total_power/(total_traffic*self.reward_normalization)
 
         if allocation_error >0: 
             #this should never happen with MaskablePPO
@@ -111,8 +117,11 @@ class NfvAllocEnv(gym.Env):
 
         self.latency_error = latency_error
 
-        if latency_error > 0 : 
-            reward -= latency_error * self.reward_latency_normalization #* (10/self.request.priority)
+        if latency_error > 0 :
+            if self.flat_lerr:
+                reward -= 300 * self.reward_latency_normalization
+            else:
+                reward -= latency_error * self.reward_latency_normalization #* (10/self.request.priority)
         
         # generate new session request
         if self.autogen_sessions:
@@ -143,15 +152,18 @@ class NfvAllocEnv(gym.Env):
     def reset(self, seed=None, options=None):
         
         # initialize random number generator that is used by the environment to a deterministic state
-        if seed is not None: #otherwise seed is reset to None by the timelimit wrapper. No way of passing the seed?
-            self._seed = seed
-        super().reset(seed=self._seed, options=options)
+        #if seed is not None: #otherwise seed is reset to None by the timelimit wrapper. No way of passing the seed?
+        #    self._seed = seed
+        #super().reset(seed=self._seed, options=options)
+        
+        super().reset(seed=seed, options=options)
 
         self.time = 0
         self.qos_breach = 0
         reward = 0
+        self.ep_requests = []
 
-        self.rng = np.random.default_rng(self._seed)
+        #self.rng = np.random.default_rng(self._seed)
 
         self.cloud_node.reset()
         for edge in self.edge_nodes:
@@ -184,7 +196,7 @@ class NfvAllocEnv(gym.Env):
                                        0.0, 
                                        self.cloud_node.get_power_consumption(), 
                                        self.cloud_node.get_latency()]).reshape((1,4))
-        if self.metric == 'cpu':
+        if self.obs_metric == 'cpu':
             cloud_observations[0,2] = self.cloud_node.get_cpu_consumption()
             
         edge_obs = []
@@ -192,9 +204,11 @@ class NfvAllocEnv(gym.Env):
         for node in self.edge_nodes:
             traffic = node.get_traffic()
             max_traffic = node.max_traffic
+            
             power = node.get_power_consumption()
-            if self.metric == 'cpu':
+            if self.obs_metric == 'cpu':
                 power = node.get_cpu_consumption()
+                
             latency = node.get_latency()
 
             node_obs = [traffic,
@@ -206,7 +220,7 @@ class NfvAllocEnv(gym.Env):
         edge_observations = np.array(edge_obs)
 
         request_observations = np.tile(
-            np.array([self.request.qos, 
+            np.array([self.request.latency, 
                       self.request.throughput, #add also request.duration
                       self.dt]), 
             (self.n_edges+1,1))
@@ -220,7 +234,8 @@ class NfvAllocEnv(gym.Env):
 
         info = {
                 'qos_breach': self.qos_breach,
-                'power_per_mbit': self.power_per_mbit()
+                'power_per_mbit': self.power_per_mbit(),
+                'qi': self.request.qos
                }
         
         return info
@@ -264,14 +279,16 @@ class NfvAllocEnv(gym.Env):
         qi_list = list(self.qi_dict.keys())
         qi_prob = list(self.qi_dict.values())
 
-        qi = self.rng.choice(qi_list, p = qi_prob)
-        duration = self.rng.normal(loc=self.duration_mean, scale=self.duration_scale)
-        throughput = self.rng.uniform(low=10, high=100)
+        qi = self.np_random.choice(qi_list, p = qi_prob)
+        duration = self.np_random.normal(loc=self.duration_mean, scale=self.duration_scale)
+        throughput = self.np_random.uniform(low=10, high=100)
         latency = self.qi_table[str(qi)]["delay"]
         priority = self.qi_table[str(qi)]["priority"]
         
         session = PDUSession(qi, latency, duration, priority, throughput, self.time)
-        dt = self.rng.exponential(self.dt_scale)
+        dt = self.np_random.exponential(self.dt_scale)
+
+        self.ep_requests.append(qi)
         
         return session, dt
 
@@ -291,11 +308,13 @@ class NfvAllocEnv(gym.Env):
     def print_env(self):
         print('current time: ', self.time)
         print('env action mask: ', self.action_masks())
+        #print('seed: ', self._seed)
         print('-- Cloud host --')
         print('power coefficient: ', self.cloud_node.power_coef)
         print('base latency: ', self.cloud_node.base_latency)
-        print('current traffic: ', self.cloud_node.traffic)
+        print('current traffic: ', self.cloud_node.get_traffic())
         print('current power consumption: ', self.cloud_node.get_power_consumption())
+        print('session counter: ', self.cloud_node.session_counter)
         print('active sessions: ', len(self.cloud_node.active_sessions))
         qis = []
         for session in self.cloud_node.active_sessions:
@@ -308,10 +327,11 @@ class NfvAllocEnv(gym.Env):
             print('power model: ', edge.power_model)
             print('base latency: ', edge.base_latency)
             print('max traffic: ', edge.max_traffic)
-            print('current traffic: ', edge.traffic)
+            print('current traffic: ', edge.get_traffic())
             print('current power consumption: ', edge.get_power_consumption())
             print('is on: ', edge.is_on)
             print('turned off times: ', edge.on_off_counter)
+            print('session counter: ', edge.session_counter)
             print('active sessions: ', len(edge.active_sessions))
             qis = []
             exp = []
@@ -320,3 +340,4 @@ class NfvAllocEnv(gym.Env):
                 exp.append(session[0])
             print('qos indicator: ',qis)
             #print('end times: ',exp)
+        print('=============================')
