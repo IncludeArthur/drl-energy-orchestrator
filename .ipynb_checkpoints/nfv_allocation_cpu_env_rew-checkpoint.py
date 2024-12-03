@@ -105,7 +105,7 @@ class NfvAllocEnvRew(gym.Env):
         if self.rw_metric == 'cpu':
             consumption_metric = total_cpu
         
-        k = 10 #paramether in the reward - env specific
+        k = 10 #scaling paramether in the reward: env specific
         if self.rw_metric == 'latency': #reward only based on the latency errors
             k = 0
 
