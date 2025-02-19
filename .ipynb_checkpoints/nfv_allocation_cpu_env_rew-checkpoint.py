@@ -2,6 +2,7 @@ import numpy as np
 import math
 import json
 import heapq
+import pygame
 
 import gymnasium as gym
 from gymnasium import spaces
@@ -11,9 +12,11 @@ from env_utils import CloudHost, EdgeHost, PDUSession
 
 class NfvAllocEnvRew(gym.Env):
 
+    metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 30}
+
     ''' #### ENVIRONMENT FUNCTIONS #### '''
 
-    def __init__(self, config_file, obs_metric, rw_metric, dt_scale, duration_mean, duration_scale, qi_dict, flat_lerr=False):
+    def __init__(self, config_file, obs_metric, rw_metric, dt_scale, duration_mean, duration_scale, qi_dict, flat_lerr=False, render_mode=None):
 
         self.time = 0
         self.qos_breach = 0
@@ -67,6 +70,13 @@ class NfvAllocEnvRew(gym.Env):
 
         # action space = discrete |E|+1 
         self.action_space = spaces.Discrete(self.n_edges + 1) #0 is the cloud node
+
+        assert render_mode is None or render_mode in self.metadata["render_modes"]
+        self.render_mode = render_mode
+
+        self.window_size = 512 
+        self.window = None
+        self.clock = None
 
         #print(self.cloud_node)
         #print(self.edge_nodes)
@@ -142,6 +152,9 @@ class NfvAllocEnvRew(gym.Env):
         info['total_power']=self.measure_power()
         info['total_traffic']=self.measure_traffic()
         info['reward'] = reward
+
+        if self.render_mode == "human":
+            self._render_frame()
         
         return observations, reward, terminated, truncated, info
 
@@ -169,6 +182,9 @@ class NfvAllocEnvRew(gym.Env):
         session, dt = self.get_new_session()
         self.request = session
         self.dt = dt
+
+        if self.render_mode == "human":
+            self._render_frame()
         
         return self._get_obs(), self._get_info()
 
@@ -348,3 +364,92 @@ class NfvAllocEnvRew(gym.Env):
             print('qos indicator: ',qis)
             #print('end times: ',exp)
         print('=============================')
+
+    def render(self):
+        if self.render_mode == "rgb_array":
+            return self._render_frame()
+
+    def close(self):
+        if self.window is not None:
+            pygame.display.quit()
+            pygame.quit()
+
+    def _render_frame(self):
+        if self.window is None and self.render_mode == "human":
+            pygame.init()
+            pygame.display.init()
+            self.window = pygame.display.set_mode(
+                (self.window_size, self.window_size)
+            )
+        if self.clock is None and self.render_mode == "human":
+            self.clock = pygame.time.Clock()
+
+        canvas = pygame.Surface((self.window_size, self.window_size))
+        canvas.fill((255, 255, 255))
+        edge_positions = [50,150,250]
+        rect_length = 100
+        rect_hight = 40
+        powerbar_scale = 3
+
+        font = pygame.font.SysFont(None, 20)
+        text_list = []
+
+        # Draw gauges for cloud consumption
+        cloud_max_traffic_render = 1000 #cloud does not have max traffic, this is only for rendering
+        filling = self.cloud_node.traffic/cloud_max_traffic_render*rect_length
+        pygame.draw.rect(canvas,(0, 0, 255),pygame.Rect(200,edge_positions[0],filling,rect_hight), )
+
+        #draw power consumption
+        cloud_power = self.cloud_node.get_power_consumption()*powerbar_scale
+        pygame.draw.rect(canvas,(0, 200, 0),pygame.Rect(200,edge_positions[0]+rect_hight,cloud_power,10), )
+
+        text = font.render('CLOUD', True, (0,0,0))
+        text_list.append((text,(200,edge_positions[0]-20)))
+        #pygame.draw.rect(text, (255,255,255), textRect, 1)
+
+        # Draw gauges for edge consumption
+        edge_power=0
+        for i,edge in enumerate(self.edge_nodes):
+            
+            #draw rect borders
+            border_col = (0, 0, 0) if edge.is_on else (150,150,150)
+            pygame.draw.rect(canvas,border_col,pygame.Rect(10,edge_positions[i],rect_length,rect_hight), 2)
+            
+            #draw rect filling
+            filling = edge.traffic/edge.max_traffic*rect_length
+            pygame.draw.rect(canvas,(255, 0, 0),pygame.Rect(10,edge_positions[i],filling,rect_hight), )
+
+            #draw power consumption
+            power = edge.get_power_consumption()*powerbar_scale
+            edge_power += power
+            pygame.draw.rect(canvas,(0, 200, 0),pygame.Rect(10,edge_positions[i]+rect_hight,power,10), )
+
+        text = font.render('EDGE', True, (0,0,0))
+        text_list.append((text,(10,edge_positions[0]-20)))
+
+        text = font.render('TOTAL POWER CONSUMPTION: '+str(round(self.measure_power(),2))+'W', True, (0,0,0))
+        text_list.append((text,(200,200)))
+
+        pygame.draw.rect(canvas,(0, 0, 255),pygame.Rect(200, 180,cloud_power,10), )
+        pygame.draw.rect(canvas,(255, 0, 0),pygame.Rect(200+cloud_power, 180,edge_power,10), )
+
+        text = font.render('POWER per Mbit: '+str(round(self.power_per_mbit()*1000))+'mW', True, (0,0,0))
+        text_list.append((text,(200,260)))
+
+        if self.render_mode == "human":
+            # The following line copies our drawings from `canvas` to the visible window
+            self.window.blit(canvas, canvas.get_rect())
+            
+            for text in text_list:
+                self.window.blit(text[0],text[1])
+                
+            pygame.event.pump()
+            pygame.display.update()
+
+            # We need to ensure that human-rendering occurs at the predefined framerate.
+            # The following line will automatically add a delay to keep the framerate stable.
+            self.clock.tick(self.metadata["render_fps"])
+        else:  # rgb_array with no text
+            return np.transpose(
+                np.array(pygame.surfarray.pixels3d(canvas)), axes=(1, 0, 2)
+            )
